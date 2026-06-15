@@ -30,3 +30,8 @@ training:
 
 paths:
   checkpoint_dir: checkpoints/
+
+wandb:
+  project: imposter-net
+  run_name: null    # auto-generated if null
+  enabled: true

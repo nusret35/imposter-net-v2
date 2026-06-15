@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import wandb
 import yaml
 
 # Allow imports from src/ when run from project root
@@ -31,27 +32,42 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def evaluate_val(model: nn.Module, loader: DataLoader, device: torch.device) -> dict:
+def evaluate_val(
+    model: nn.Module,
+    loader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+) -> dict:
     """
     Video-level evaluation: averages frame logits within each video.
     The val DataLoader returns batches of shape (B, N_frames, C, H, W).
+    Returns metrics dict including val_loss, auc, accuracy, f1.
     """
     model.eval()
     all_probs: list[float] = []
     all_labels: list[float] = []
+    loss_meter = AverageMeter()
 
     with torch.no_grad():
         for frames, labels in tqdm(loader, desc="Val", leave=False):
             # frames: (B, N_frames, C, H, W)
             B, N, C, H, W = frames.shape
             frames = frames.view(B * N, C, H, W).to(device)
-            logits = model(frames)                      # (B*N,)
-            logits = logits.view(B, N).mean(dim=1)     # (B,)  video-level mean
+            labels_dev = labels.to(device)
+
+            logits = model(frames)                          # (B*N,)
+            logits = logits.view(B, N).mean(dim=1)         # (B,) video-level mean
+
+            loss = criterion(logits, labels_dev)
+            loss_meter.update(loss.item(), B)
+
             probs = torch.sigmoid(logits).cpu().numpy()
             all_probs.extend(probs.tolist())
             all_labels.extend(labels.numpy().tolist())
 
-    return compute_metrics(np.array(all_labels), np.array(all_probs))
+    metrics = compute_metrics(np.array(all_labels), np.array(all_probs))
+    metrics["val_loss"] = loss_meter.avg
+    return metrics
 
 
 def train_one_epoch(
@@ -90,6 +106,15 @@ def main(cfg: dict):
     set_seed(cfg["training"]["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+
+    # --- W&B ---
+    wandb_cfg = cfg.get("wandb", {})
+    wandb.init(
+        project=wandb_cfg.get("project", "imposter-net"),
+        name=wandb_cfg.get("run_name", None),
+        config=cfg,
+        mode="online" if wandb_cfg.get("enabled", True) else "disabled",
+    )
 
     # --- Data ---
     face_detector = None
@@ -171,18 +196,30 @@ def main(cfg: dict):
             model, train_loader, optimizer, criterion, scaler, device,
             cfg["training"]["grad_clip"],
         )
-        val_metrics = evaluate_val(model, val_loader, device)
+        val_metrics = evaluate_val(model, val_loader, criterion, device)
         scheduler.step()
 
         auc = val_metrics["auc"]
+        lr = scheduler.get_last_lr()[0]
         print(
             f"Epoch {epoch:03d}/{cfg['training']['epochs']} | "
-            f"Loss: {train_loss:.4f} | "
+            f"Train Loss: {train_loss:.4f} | "
+            f"Val Loss: {val_metrics['val_loss']:.4f} | "
             f"AUC: {auc:.4f} | "
             f"Acc: {val_metrics['accuracy']:.4f} | "
             f"F1: {val_metrics['f1']:.4f} | "
-            f"LR: {scheduler.get_last_lr()[0]:.2e}"
+            f"LR: {lr:.2e}"
         )
+
+        wandb.log({
+            "epoch":        epoch,
+            "train/loss":   train_loss,
+            "val/loss":     val_metrics["val_loss"],
+            "val/auc":      auc,
+            "val/accuracy": val_metrics["accuracy"],
+            "val/f1":       val_metrics["f1"],
+            "lr":           lr,
+        })
 
         if auc > best_auc:
             best_auc = auc
@@ -197,6 +234,8 @@ def main(cfg: dict):
                 },
                 save_path,
             )
+            wandb.summary["best_auc"]   = best_auc
+            wandb.summary["best_epoch"] = epoch
             print(f"  ✓ Saved best checkpoint (AUC={best_auc:.4f}) → {save_path}")
 
     print(f"\nTraining complete. Best val AUC: {best_auc:.4f}")
