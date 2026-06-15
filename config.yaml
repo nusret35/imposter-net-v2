@@ -1,0 +1,32 @@
+data:
+  # Path to labels.csv (columns: File Path, Label, ...)
+  labels_csv: ff-output/labels.csv
+  # Root directory containing per-video frame directories
+  frames_dir: ff-output/jpegs/
+  # Fraction of identities reserved for validation (no overlap with train)
+  val_split: 0.15
+  # Fraction of identities reserved for final test (no overlap with train or val)
+  test_split: 0.15
+  num_workers: 4
+
+model:
+  backbone: swin_tiny_patch4_window7_224
+  pretrained: true
+  dropout: 0.3
+  # Set to true to crop faces with MTCNN before feeding to the model
+  use_mtcnn: true
+  # Pixel margin added around the detected face bounding box
+  mtcnn_margin: 30
+
+training:
+  epochs: 30
+  batch_size: 32
+  lr: 2.0e-4
+  weight_decay: 1.0e-4
+  # Freeze backbone for this many epochs, then unfreeze for full fine-tune
+  freeze_epochs: 5
+  grad_clip: 1.0
+  seed: 42
+
+paths:
+  checkpoint_dir: checkpoints/
