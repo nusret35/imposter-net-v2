@@ -121,7 +121,6 @@ def main(cfg: dict):
     if cfg["model"].get("use_mtcnn", False):
         face_detector = FaceDetector(
             margin=cfg["model"].get("mtcnn_margin", 30),
-            device=str(device),
         )
         print("MTCNN face detection enabled.")
 

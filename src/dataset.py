@@ -15,6 +15,7 @@ Identity extraction:
     "DeepFakeDetection/06_18__" → ["06", "18"]   (split on __ first)
 """
 
+import os
 import random
 import warnings
 from pathlib import Path
@@ -88,6 +89,11 @@ def _load_frame(path: Path) -> np.ndarray:
 # MTCNN face detector
 # ---------------------------------------------------------------------------
 
+# Per-process MTCNN registry — avoids re-initialising CUDA in forked workers.
+# Each DataLoader worker process gets its own MTCNN instance (always on CPU).
+_mtcnn_registry: dict = {}
+
+
 class FaceDetector:
     """
     MTCNN-based face detector that crops the largest face from a frame
@@ -95,26 +101,39 @@ class FaceDetector:
 
     Falls back to returning the full image if no face is detected.
 
+    MTCNN is initialised lazily on first use inside each worker process
+    (always on CPU) to avoid the "Cannot re-initialize CUDA in forked
+    subprocess" error that occurs when using num_workers > 0 with DataLoader.
+
     Requires: pip install facenet-pytorch
     """
 
-    def __init__(self, margin: int = 30, min_face_size: int = 40, device: str = "cpu"):
-        try:
-            from facenet_pytorch import MTCNN
-        except ImportError as e:
-            raise ImportError(
-                "facenet-pytorch is required for face detection. "
-                "Install it with: pip install facenet-pytorch"
-            ) from e
-
-        self.mtcnn = MTCNN(
-            keep_all=False,
-            select_largest=True,
-            min_face_size=min_face_size,
-            post_process=False,
-            device=device,
-        )
+    def __init__(self, margin: int = 30, min_face_size: int = 40):
         self.margin = margin
+        self.min_face_size = min_face_size
+        # Intentionally NOT initialising MTCNN here — see _get_mtcnn().
+
+    def _get_mtcnn(self):
+        """Return this process's MTCNN instance, creating it if needed."""
+        pid = os.getpid()
+        if pid not in _mtcnn_registry:
+            try:
+                from facenet_pytorch import MTCNN
+            except ImportError as e:
+                raise ImportError(
+                    "facenet-pytorch is required for face detection. "
+                    "Install it with: pip install facenet-pytorch"
+                ) from e
+            # Always CPU: MTCNN is lightweight and GPU can't be used in
+            # forked DataLoader worker processes.
+            _mtcnn_registry[pid] = MTCNN(
+                keep_all=False,
+                select_largest=True,
+                min_face_size=self.min_face_size,
+                post_process=False,
+                device="cpu",
+            )
+        return _mtcnn_registry[pid]
 
     def crop(self, img: np.ndarray) -> np.ndarray:
         """
@@ -123,7 +142,7 @@ class FaceDetector:
         """
         from PIL import Image
 
-        boxes, _ = self.mtcnn.detect(Image.fromarray(img))
+        boxes, _ = self._get_mtcnn().detect(Image.fromarray(img))
         if boxes is None or len(boxes) == 0:
             return img
 

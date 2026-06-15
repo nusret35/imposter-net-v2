@@ -36,7 +36,7 @@ def load_config(path: str) -> dict:
 
 
 def load_model(checkpoint_path: str, device: torch.device) -> tuple[SwinDeepfakeDetector, dict]:
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
     cfg = ckpt["config"]
     model = SwinDeepfakeDetector(
         backbone=cfg["model"]["backbone"],
@@ -100,7 +100,7 @@ def predict(
     # Optional face crop
     if use_mtcnn or cfg["model"].get("use_mtcnn", False):
         margin = cfg["model"].get("mtcnn_margin", mtcnn_margin)
-        detector = FaceDetector(margin=margin, device=str(device))
+        detector = FaceDetector(margin=margin)
         img = detector.crop(img)
 
     transform = build_transforms(train=False)
