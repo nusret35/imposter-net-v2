@@ -1,25 +1,20 @@
 """
-Dataset for FaceForensics++ with identity-based train/val/test splitting.
+Dataset for FaceForensics++ with video-level train/val/test splitting.
 
-Key guarantee: No face identity that appears in training is present in
-validation or test — whether via original or manipulated videos.
+Key guarantee: No video that appears in training is present in
+validation or test.
 
 Directory name mapping (CSV path → jpegs folder):
     "Face2Face/944_032.mp4"                  → Face2Face_944_032
     "original/500.mp4"                       → original_500
     "DeepFakeDetection/06_18__walking.mp4"   → DeepFakeDetection_06_18__walking
-
-Identity extraction:
-    "original/500.mp4"          → ["500"]
-    "Face2Face/944_032.mp4"     → ["944", "032"]
-    "DeepFakeDetection/06_18__" → ["06", "18"]   (split on __ first)
 """
 
 import os
 import random
 import warnings
 from pathlib import Path
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -35,7 +30,6 @@ LABEL_MAP = {"REAL": 0, "FAKE": 1}
 
 # Type aliases
 Sample = Tuple[Path, int]
-Record = Tuple[Path, int, List[str]]
 
 
 # ---------------------------------------------------------------------------
@@ -50,21 +44,6 @@ def path_to_dir_name(file_path: str) -> str:
     e.g. "Face2Face/944_032.mp4" → "Face2Face_944_032"
     """
     return Path(file_path).with_suffix("").as_posix().replace("/", "_")
-
-
-def extract_identities(file_path: str) -> List[str]:
-    """
-    Extract numeric identity IDs from a video file path.
-
-    Handles all FF++ naming conventions:
-      original/500.mp4                         -> ["500"]
-      Face2Face/944_032.mp4                    -> ["944", "032"]
-      DeepFakeDetection/06_18__walking....mp4  -> ["06", "18"]
-    """
-    stem = Path(file_path).stem
-    first_part = stem.split("__")[0]   # drop description after double underscore
-    parts = first_part.split("_")
-    return [p for p in parts if p.isdigit()]
 
 
 # ---------------------------------------------------------------------------
@@ -239,13 +218,13 @@ class FFDataset(Dataset):
 
 
 # ---------------------------------------------------------------------------
-# Identity-based split helpers  (extracted to keep build_splits simple)
+# Video-level split helpers
 # ---------------------------------------------------------------------------
 
-def _parse_csv_to_records(csv_path: str, frames_dir: Path) -> List[Record]:
-    """Read CSV and resolve each row to (dir_path, label, identity_ids)."""
+def _parse_csv_to_samples(csv_path: str, frames_dir: Path) -> List[Sample]:
+    """Read CSV and resolve each row to (dir_path, label)."""
     df = pd.read_csv(csv_path, index_col=0)
-    records: List[Record] = []
+    samples: List[Sample] = []
     missing = 0
 
     for _, row in df.iterrows():
@@ -258,63 +237,34 @@ def _parse_csv_to_records(csv_path: str, frames_dir: Path) -> List[Record]:
             missing += 1
             continue
 
-        records.append((dir_path, label, extract_identities(str(row["File Path"]))))
+        samples.append((dir_path, label))
 
     if missing:
         warnings.warn(
             f"{missing} CSV rows skipped — directory not found or empty under '{frames_dir}'. "
             "Check that path_to_dir_name() matches your folder naming."
         )
-    return records
+    return samples
 
 
-def _partition_ids(
-    all_ids: Set[str],
+def _split_samples(
+    samples: List[Sample],
     val_split: float,
     test_split: float,
     seed: int,
-) -> Tuple[Set[str], Set[str], Set[str]]:
-    """Randomly partition identity IDs into (train_ids, val_ids, test_ids)."""
+) -> Tuple[List[Sample], List[Sample], List[Sample]]:
+    """Randomly split videos into train / val / test."""
     rng = np.random.default_rng(seed)
-    shuffled = rng.permutation(sorted(all_ids))
+    indices = rng.permutation(len(samples))
 
-    n = len(shuffled)
+    n = len(indices)
     n_test = max(1, int(n * test_split))
     n_val  = max(1, int(n * val_split))
 
-    test_ids  = set(shuffled[:n_test])
-    val_ids   = set(shuffled[n_test : n_test + n_val])
-    train_ids = set(shuffled[n_test + n_val :])
-    return train_ids, val_ids, test_ids
-
-
-def _assign_to_splits(
-    records: List[Record],
-    train_ids: Set[str],
-    val_ids: Set[str],
-    test_ids: Set[str],
-) -> Tuple[List[Sample], List[Sample], List[Sample], int]:
-    """Assign each video to exactly one split; skip if IDs span multiple splits."""
-    train: List[Sample] = []
-    val:   List[Sample] = []
-    test:  List[Sample] = []
-    skipped = 0
-
-    for dir_path, label, ids in records:
-        if not ids:
-            skipped += 1
-            continue
-        id_set = set(ids)
-        if id_set <= train_ids:
-            train.append((dir_path, label))
-        elif id_set <= val_ids:
-            val.append((dir_path, label))
-        elif id_set <= test_ids:
-            test.append((dir_path, label))
-        else:
-            skipped += 1   # IDs span multiple splits → skip
-
-    return train, val, test, skipped
+    test_samples  = [samples[i] for i in indices[:n_test]]
+    val_samples   = [samples[i] for i in indices[n_test : n_test + n_val]]
+    train_samples = [samples[i] for i in indices[n_test + n_val :]]
+    return train_samples, val_samples, test_samples
 
 
 def _print_split_summary(
@@ -342,28 +292,16 @@ def build_splits(
     face_detector: Optional[FaceDetector] = None,
 ) -> Tuple[FFDataset, FFDataset, FFDataset]:
     """
-    Build train / val / test datasets from labels.csv using identity-based splitting.
+    Build train / val / test datasets from labels.csv using video-level splitting.
 
-    Why identity-based?
-    -------------------
-    In FF++, fake videos are derived from real (original) videos.
-    For example, Face2Face/944_032.mp4 uses faces from original/944.mp4
-    and original/032.mp4. If identity 944 were in training while
-    Face2Face/944_032.mp4 were in validation, the model could exploit
-    memorised texture/identity cues — a data leak.
-
-    Strategy:
-    ---------
-    1. Collect all unique numeric IDs across every video path.
-    2. Randomly partition IDs → train_ids / val_ids / test_ids.
-    3. Assign a video to a split only if ALL its IDs belong to that split.
-    4. Skip videos whose IDs span multiple splits (prevents leakage).
+    Each video is randomly assigned to exactly one split so that no video
+    appears in both training and evaluation.
 
     Args:
         csv_path:       Path to labels.csv.
         frames_dir:     Root directory containing per-video frame directories.
-        val_split:      Fraction of identities for validation.
-        test_split:     Fraction of identities for testing.
+        val_split:      Fraction of videos for validation.
+        test_split:     Fraction of videos for testing.
         image_size:     Resize target for transforms.
         seed:           Random seed for reproducible splits.
         face_detector:  Optional FaceDetector passed to each FFDataset.
@@ -373,26 +311,14 @@ def build_splits(
     """
     frames_root = Path(frames_dir)
 
-    records = _parse_csv_to_records(csv_path, frames_root)
+    samples = _parse_csv_to_samples(csv_path, frames_root)
 
-    all_ids: Set[str] = {i for _, _, ids in records for i in ids}
-    train_ids, val_ids, test_ids = _partition_ids(all_ids, val_split, test_split, seed)
-
-    train_samples, val_samples, test_samples, skipped = _assign_to_splits(
-        records, train_ids, val_ids, test_ids
+    train_samples, val_samples, test_samples = _split_samples(
+        samples, val_split, test_split, seed
     )
-
-    if skipped:
-        warnings.warn(
-            f"{skipped} videos skipped (identity spans multiple splits or unknown identity)."
-        )
 
     print("Dataset split summary:")
     _print_split_summary(train_samples, val_samples, test_samples)
-
-    # Sanity check: no identity overlap between train and eval sets
-    eval_ids = val_ids | test_ids
-    assert not (train_ids & eval_ids), "BUG: identity leak between train and eval sets!"
 
     return (
         FFDataset(train_samples, train=True,  image_size=image_size, face_detector=face_detector),
