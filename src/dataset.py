@@ -167,7 +167,7 @@ def build_transforms(train: bool, image_size: int = 224) -> A.Compose:
             A.Resize(image_size, image_size),
             A.HorizontalFlip(p=0.5),
             A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
-            A.ImageCompression(quality_lower=50, quality_upper=90, p=0.5),
+            A.ImageCompression(quality_range=(50, 90), p=0.5),
             A.GaussNoise(p=0.2),
             A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
             ToTensorV2(),
@@ -184,7 +184,7 @@ def build_transforms(train: bool, image_size: int = 224) -> A.Compose:
 # Dataset
 # ---------------------------------------------------------------------------
 
-class FF_Dataset(Dataset):
+class FFDataset(Dataset):
     """
     FaceForensics++ dataset where each video is a directory of frames.
 
@@ -340,7 +340,7 @@ def build_splits(
     image_size: int = 224,
     seed: int = 42,
     face_detector: Optional[FaceDetector] = None,
-) -> Tuple[FF_Dataset, FF_Dataset, FF_Dataset]:
+) -> Tuple[FFDataset, FFDataset, FFDataset]:
     """
     Build train / val / test datasets from labels.csv using identity-based splitting.
 
@@ -366,7 +366,7 @@ def build_splits(
         test_split:     Fraction of identities for testing.
         image_size:     Resize target for transforms.
         seed:           Random seed for reproducible splits.
-        face_detector:  Optional FaceDetector passed to each FF_Dataset.
+        face_detector:  Optional FaceDetector passed to each FFDataset.
 
     Returns:
         (train_dataset, val_dataset, test_dataset)
@@ -395,7 +395,7 @@ def build_splits(
     assert not (train_ids & eval_ids), "BUG: identity leak between train and eval sets!"
 
     return (
-        FF_Dataset(train_samples, train=True,  image_size=image_size, face_detector=face_detector),
-        FF_Dataset(val_samples,   train=False, image_size=image_size, face_detector=face_detector),
-        FF_Dataset(test_samples,  train=False, image_size=image_size, face_detector=face_detector),
+        FFDataset(train_samples, train=True,  image_size=image_size, face_detector=face_detector),
+        FFDataset(val_samples,   train=False, image_size=image_size, face_detector=face_detector),
+        FFDataset(test_samples,  train=False, image_size=image_size, face_detector=face_detector),
     )

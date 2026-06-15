@@ -93,7 +93,9 @@ class SwinDeepfakeDetector(nn.Module):
         Returns:
             logits: (B,) — use BCEWithLogitsLoss during training
         """
-        stage_feats = self.backbone(x)  # list of 4 feature maps
+        stage_feats = self.backbone(x)  # list of 4 feature maps: (B, H, W, C)
+        # timm's Swin Transformer outputs NHWC; permute to NCHW for AdaptiveAvgPool2d
+        stage_feats = [f.permute(0, 3, 1, 2).contiguous() for f in stage_feats]
         proj_feats = [proj(f) for proj, f in zip(self.projectors, stage_feats)]
 
         freq_feat = self.freq_branch(x)
